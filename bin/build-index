@@ -1,0 +1,132 @@
+#!/usr/bin/env ruby
+require_relative '../lib/spg'
+
+require 'optparse'
+require 'csv'
+
+module SPG
+  # Fetch the pricing data for SPG hotels in SF and output it to a CSV.
+  #
+  # It accepts a start date (assumes it a monday) and the number of weeks to look at. It will output the daily rate for
+  # a stay for each week (through friday).
+  class CLI
+    Config = Struct.new(:output_path, :start_date, :number_of_weeks)
+
+    # @return [Config]
+    attr_reader :config
+
+    # @return [OptionParser]
+    attr_reader :opt_parser
+
+    # @return [SPG::API]
+    attr_reader :api
+
+    def initialize
+      @config = Config.new
+      @opt_parser = build_option_parser
+      @api = SPG::API.new
+    end
+
+    def run(argv = ARGV)
+      parse_options(argv)
+
+      with_csv do |csv|
+        each_week do |start_date, end_date|
+          each_property(start_date, end_date) do |property|
+            csv << to_row(start_date, end_date, property)
+          end
+        end
+      end
+    rescue OptionParser::MissingArgument => e
+      missing_options!(*e.args)
+    end
+
+    private
+    def parse_options(argv)
+      # defaults
+      config.number_of_weeks = 1
+
+      opt_parser.parse!(argv)
+
+      # required
+      missing_options!('start_date') unless config.start_date
+    end
+
+    def missing_options!(*args)
+      puts "missing parameter: #{args.join(' ')}"
+      puts opt_parser
+      exit(1)
+    end
+
+    def build_option_parser
+      OptionParser.new do |opts|
+        opts.banner = "Usage: #{File.basename(__FILE__)} [options]"
+
+        opts.on('-o', '--output FILE', String, 'FILE to write output to ') do |n|
+          config.output_path = n
+        end
+
+        opts.on('-s', '--start DATE', String, 'DATE of the first Monday to begin indexing from') do |n|
+          config.start_date = Date.parse(n)
+        end
+        opts.on('-w', '--weeks NUMBER', Integer, 'NUMBER of weeks to search') do |n|
+          config.number_of_weeks = n
+        end
+
+        opts.on('-h', '--help', 'Prints this help') do
+          puts opts
+          exit
+        end
+      end
+    end
+
+    # formatted row to output
+    # @param [Date] start_date
+    # @param [Date] end_date
+    # @param [SPG::SearchPage::Property] property
+    # @return [Array<String>]
+    def to_row(start_date, end_date, property)
+      [start_date.to_s, end_date.to_s, property.name, property.url, "$#{property.rates.first.amount}"]
+    end
+
+    # yields a CSV object w\ the configured output stream and ensures the stream is closed
+    # @yieldparam [CSV] csv
+    def with_csv
+      output = open_output_stream
+      CSV(output) do |csv|
+        yield(csv)
+      end
+    ensure
+      output.close if output != STDOUT && !output.closed?
+    end
+
+    # @return [IO]
+    def open_output_stream
+      config.output_path ? File.open(config.output_path, 'w') : STDOUT
+    end
+
+    # @yieldparam [Date] start_date
+    # @yieldparam [Date] end_date
+    def each_week
+      start_date = config.start_date
+      config.number_of_weeks.times do
+        end_date = start_date + 4 # = T, W, T, F
+
+        yield start_date, end_date
+
+        start_date = start_date + 7 # = T, W, T, F, S, S, M
+      end
+    end
+
+    # yields a list of properties
+    # @yieldparam [SPG::SearchPage::Property] property
+    # @param [Date] start_date
+    # @param [Date] end_date
+    def each_property(start_date, end_date)
+      result = api.search SPG::SearchQuery.new(start_date, end_date)
+      result.properties.each { |n| yield(n) unless n.rates.empty? }
+    end
+  end
+end
+
+SPG::CLI.new.run if __FILE__ == $PROGRAM_NAME
